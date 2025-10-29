@@ -1,7 +1,7 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 Description: >
-  SAM template con Cognito (login/registro) y DynamoDB (almacenamiento de usuarios).
+  SAM template con Cognito (login/registro) y DynamoDB (almacenamiento de chats).
   Usa una Lambda PostConfirmation en Python 3.12.
 
 Globals:
@@ -11,39 +11,60 @@ Globals:
 
 Resources:
 
-  UsersTable:
-    Type: AWS::DynamoDB::Table
+  # --------------------------------------- [API] ---------------------------------------
+  ChatApi:
+    Type: AWS::Serverless::Api
     Properties:
-      TableName: !Sub "${AWS::StackName}-Users"
-      AttributeDefinitions:
-        - AttributeName: userId
-          AttributeType: S
-      KeySchema:
-        - AttributeName: userId
-          KeyType: HASH
-      BillingMode: PAY_PER_REQUEST
+      Name: !Sub "${AWS::StackName}-ChatApi"
+      StageName: Prod
+      Cors:
+        AllowMethods: "'OPTIONS,GET,POST,PUT,DELETE'"
+        AllowHeaders: "'Content-Type,Authorization'"
+        AllowOrigin: "'*'"
 
   # --------------------------------------- [SINGLE TABLE DESIGN CHATBOT] ---------------------------------------
-
   PetsChatbotTable:
     Type: AWS::DynamoDB::Table
     Properties:
       TableName: !Sub "${AWS::StackName}-chatdata"
       AttributeDefinitions:
-        - AttributeName: PK # Partition Key
+        - AttributeName: PK
           AttributeType: S
-        - AttributeName: SK # Sort Key
+        - AttributeName: SK
           AttributeType: S
       KeySchema:
-        - AttributeName: PK 
+        - AttributeName: PK
           KeyType: HASH
         - AttributeName: SK
           KeyType: RANGE
       BillingMode: PAY_PER_REQUEST
 
+  # --------------------------------------- [API CREACION DE NUEVOS CHATS] ---------------------------------------
+  ChatApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-new-chat-api"
+      Description: "API para crear chats en DynamoDB"
+      CodeUri: backend/chat_api/
+      Handler: app.lambda_handler
+      Runtime: python3.12
+      Timeout: 10
+      MemorySize: 128
+      Environment:
+        Variables:
+          CHAT_TABLE: !Ref PetsChatbotTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PetsChatbotTable
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /chats
+            Method: POST
+            RestApiId: !Ref ChatApi
 
   # --------------------------------------- [COGNITO USER POOL + CLIENTE] ---------------------------------------
-
   CognitoUserPool:
     Type: AWS::Cognito::UserPool
     Properties:
@@ -90,7 +111,6 @@ Resources:
       UserPoolId: !Ref CognitoUserPool
 
   # --------------------------------------- [IDENTITY POOL - PARA CREDENCIALES AWS TEMPORALES] ---------------------------------------
-
   CognitoIdentityPool:
     Type: AWS::Cognito::IdentityPool
     Properties:
@@ -127,10 +147,7 @@ Resources:
                   - dynamodb:PutItem
                   - dynamodb:UpdateItem
                   - dynamodb:Query
-                Resource:
-                  - !GetAtt UsersTable.Arn
-                  - !GetAtt PetsChatbotTable.Arn
-
+                Resource: !GetAtt PetsChatbotTable.Arn
 
   CognitoIdentityPoolRoleAttachment:
     Type: AWS::Cognito::IdentityPoolRoleAttachment
@@ -140,23 +157,18 @@ Resources:
         authenticated: !GetAtt CognitoIdentityPoolAuthRole.Arn
 
   # --------------------------------------- [LAMBDA POST CONFIRMATION] ---------------------------------------
-
   PostConfirmationFunction:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: !Sub "${AWS::StackName}-PostConfirmation"
-      Description: "Post confirmation trigger - guarda usuarios en DynamoDB tras registro"
+      Description: "Post confirmation trigger - lógica adicional tras registro de usuario"
       CodeUri: backend/post_confirmation/
       Handler: app.lambda_handler
       Runtime: python3.12
       Timeout: 10
       MemorySize: 128
-      Environment:
-        Variables:
-          USERS_TABLE: !Ref UsersTable
       Policies:
-        - DynamoDBCrudPolicy:
-            TableName: !Ref UsersTable
+        - AWSLambdaBasicExecutionRole
 
   AllowCognitoInvokePostConfirmation:
     Type: AWS::Lambda::Permission
@@ -166,6 +178,7 @@ Resources:
       Principal: cognito-idp.amazonaws.com
       SourceArn: !GetAtt CognitoUserPool.Arn
 
+# --------------------------------------- [OUTPUTS] ---------------------------------------
 Outputs:
   UserPoolId:
     Description: "ID del User Pool"
@@ -176,13 +189,12 @@ Outputs:
   IdentityPoolId:
     Description: "ID del Identity Pool"
     Value: !Ref CognitoIdentityPool
-  UsersTableName:
-    Description: "Nombre de la tabla DynamoDB de usuarios"
-    Value: !Ref UsersTable
   PostConfirmationFunctionName:
     Description: "Lambda PostConfirmation"
     Value: !Ref PostConfirmationFunction
   ChatTableName:
     Description: "Tabla DynamoDB para chats y mensajes"
     Value: !Ref PetsChatbotTable
-
+  ChatApiUrl:
+    Description: "Endpoint de la API para crear chats"
+    Value: !Sub "https://${ChatApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/chats"
